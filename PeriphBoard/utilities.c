@@ -17,3 +17,12 @@ UINT32 map32(
 {
     return ((orig-old_min)*(new_max-new_min))/(old_max-new_min) + new_min;
 }
+
+float mapf(
+    float orig,
+    float old_min, float old_max,
+    float new_min, float new_max
+    )
+{
+    return ((orig-old_min)*(new_max-new_min))/(old_max-new_min) + new_min;
+}

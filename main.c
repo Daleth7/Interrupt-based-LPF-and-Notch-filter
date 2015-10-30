@@ -6,7 +6,8 @@
 #include "PeriphBoard/adc_dac.h"
 #include "PeriphBoard/utilities.h"
 
-void init_vdivider(void);
+    // Switch between using 16-bit and 12-bit resolution for the ADC
+#define RESOLUTION 12
 
 void enable_adc_tc_clocks(void);
 void enable_adc_timer(void);
@@ -44,7 +45,8 @@ int main (void)
     configure_global_ports();
     configure_ssd_ports();
 
-    init_vdivider();
+#if RESOLUTION == 16
+    // 16-bit resolution
     configure_adc(
         0x2,    // Select a V_DD_AN/2 (1.65) reference
         0x8,    // Now collect 256 samples at a time.
@@ -60,6 +62,21 @@ int main (void)
         0x18,   // Not using the negative for differential, so ground it.
         AIN_PIN // Map the adc to analog pin AIN_PIN
         );
+#elif RESOLUTION == 12
+    // 12-bit resolution
+    configure_adc(
+        0x2,    // Select a V_DD_AN/2 (1.65) reference
+        0x0,    // Now collect 1 sample at a time.
+            // Total sampling time length = (SAMPLEN+1)*(Clk_ADC/2)
+        0x1,    // Set sampling time to 1 adc clock cycle?
+        0x0,    // Relative to main clock, have adc clock run 4 times slower
+        0x1,    // For averaging more than 2 samples, change RESSEL (0x1 for 16-bit)
+        0xF,    // Since reference is 1/2, set gain to 1/2 to keep largest
+                // input voltage range (expected input will be 0 - 3.3V)
+        0x18,   // Not using the negative for differential, so ground it.
+        AIN_PIN // Map the adc to analog pin AIN_PIN
+        );
+#endif
     map_to_adc_odd(ADC_PIN);
 
     map_to_dac_even(DAC_PIN);
@@ -68,33 +85,10 @@ int main (void)
     configure_adc_interrupt();
     enable_adc_timer();
 
-//    configure_display_interrupt();
-//    enable_display_timer();
-/*
-    while(1){
-        display_number[0] = display_number[1] =  display_number[2] =  display_number[3] = -1;
-        for(; display_number[0] < 10; ++display_number[0]){
-            for(; display_number[1] < 10; ++display_number[1]){
-                for(; display_number[2] < 10; ++display_number[2]){
-                    for(; display_number[3] < 10; ++display_number[3]){
-                        delay_ms(100);
-                    }
-                    if(display_number[2] == -1) display_number[2] = 0;
-                }
-                if(display_number[1] == -1) display_number[1] = 0;
-            }
-            if(display_number[0] == -1) display_number[0] = 0;
-        }
-    }
-*/
+    configure_display_interrupt();
+    enable_display_timer();
+
     return 0;
-}
-
-void init_vdivider(void){
-        // Use pin POT_SRC for the voltage source of the voltage divider.
-    bankA->DIR.reg |= (1 << POT_SRC);
-
-    bankA->OUT.reg |= (1 << POT_SRC); // Always keep the voltage divider on
 }
 
 ///////////////////////////////////////////////////////////////////////////////////
@@ -133,11 +127,12 @@ void configure_adc_interrupt(void){
     disable_adc_timer();
 
         // Set up timer 7 settings
-        //  Sampling frequency = f_s = freq_tc_clk/Prescale_simple_clk/(Period+1)
+        //  Sampling frequency = f_s = freq_tc_clk/Prescale_simple_clk/(Period+1)/Prescale_adc_clk
         //      Let freq_tc_clk = 8Mhz/8
         //      Let Prescale_simple_clk = 1
-        //      Let Period = 9
-        //  --> f_s = 1/1/10 * 1000 kHz = 100 kHz
+        //      Let Prescale_adc_clk = 4
+        //      Let Period = 249
+        //  --> f_s = (8000/8)/1/250/4 kHz = 1 kHz
     adc_timer->CTRLA.reg |=
           (0x1 << 12u)  // Set presynchronizer to prescaled clock
         | (0x3 << 8u)   // Prescale clock by 8
@@ -145,8 +140,8 @@ void configure_adc_interrupt(void){
         | (0x2 << 5u)   // Select the Normal PWM waveform generator
         ;
 
-    adc_timer->PER.reg = 9;
-    adc_timer->CC[0].reg = 4;
+    adc_timer->PER.reg = 249;
+    adc_timer->CC[0].reg = 1;
 
         // Set up timer 6 interrupt
     NVIC->ISER[0] |= 1 << 19u;
@@ -157,25 +152,39 @@ void configure_adc_interrupt(void){
 void adc_handler(void){
         // Create static storage space
     static UINT32 adc_raw = 0, adc_volt = 0;
-    static UINT8 dig = 0;
+    static float x = 0, y = 0, y_prev = 0, x_prev = 0;
+
+#define SAMP_FREQ 1000
+#define PI 3.14
+#define BW 100
+    static const float omega = BW*2*PI/SAMP_FREQ;
+
     if(adc_timer->INTFLAG.reg & 0x1){
             // Read and convert raw pot value
         adc_raw = read_adc();
+            // Output to dac
+        x = adc_raw;
+        y = (1-omega)*y_prev + omega*x_prev;
+        write_to_dac(mapf(
+            y,
+            0,
+#if RESOLUTION == 16
+                0xFFFF,
+#elif RESOLUTION == 12
+                4095,
+#endif
+            0, 1023
+            ));
+        y_prev = y;
+        x_prev = x;
+
+            // Update display
         adc_volt = map32(adc_raw, 0, 0xFFFF, 0, 3300);
         display_number[0] = adc_volt%10;
         display_number[1] = (adc_volt%100)/10;
         display_number[2] = (adc_volt%1000)/100;
         display_number[3] = (adc_volt%10000)/1000;
 
-            // Output to dac
-        write_to_dac(map32(adc_raw, 0, 0xFFFF, 0, 1024));
-
-            // Display new number
-        display_dig(
-            0, display_number[dig], dig,
-            (dig == 3), FALSE__
-            );
-        dig = (dig == DISPLAY_DIGIT_SIZE_MAX-1) ? 0 : (dig+1);
         adc_timer->INTFLAG.reg |= 0x1;
     }
 }
@@ -237,10 +246,10 @@ void configure_display_interrupt(void){
 
 void display_handler(void){
     static UINT8 dig = 0;
-//    if(disp_timer->INTFLAG.reg & 0x1){
+    if(disp_timer->INTFLAG.reg & 0x1){
         display_dig(0, display_number[DISPLAY_DIGIT_SIZE_MAX-1-dig], dig, FALSE__, FALSE__);
         dig = (dig == DISPLAY_DIGIT_SIZE_MAX-1) ? 0 : (dig+1);
-//    }
+    }
 }
 
 void TC7_Handler(void){
