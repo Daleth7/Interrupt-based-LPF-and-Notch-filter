@@ -10,7 +10,7 @@
 #define RESOLUTION 12
     // Switch betwen LPF and notch filter
     // Comment out to switch to Notch
-//#define FILTER_LPF
+#define FILTER_LPF
 
 void enable_adc_tc_clocks(void);
 void enable_adc_timer(void);
