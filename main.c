@@ -8,6 +8,9 @@
 
     // Switch between using 16-bit and 12-bit resolution for the ADC
 #define RESOLUTION 12
+    // Switch betwen LPF and notch filter
+    // Comment out to switch to Notch
+//#define FILTER_LPF
 
 void enable_adc_tc_clocks(void);
 void enable_adc_timer(void);
@@ -30,10 +33,17 @@ void display_handler(void);
 static TcCount16* disp_timer;
 static TcCount8* adc_timer;
 
-#define POT_SRC     13      // Pin POT_SRC supplies voltage to voltage divider circuit
 #define ADC_PIN     11      // Use pin 11 for analog input from voltage divider
 #define AIN_PIN     0x13    // Use 0x13 as the port map to the analog pin
 #define DAC_PIN     2       // Use pin 2 to output waveform
+
+#define PI 3.14
+
+#if RESOLUTION == 16
+    #define RES_MAX 0xFFFF
+#elif RESOLUTION == 12
+    #define RES_MAX 4095
+#endif
 
 #define DISPLAY_DIGIT_SIZE_MAX 4
 static UINT8 display_number[DISPLAY_DIGIT_SIZE_MAX] = {1, 1, 1, 1};
@@ -45,6 +55,8 @@ int main (void)
     configure_global_ports();
     configure_ssd_ports();
 
+    bankB->DIR.reg |= (1 << 16u) | (1 << 17u);
+
 #if RESOLUTION == 16
     // 16-bit resolution
     configure_adc(
@@ -54,8 +66,8 @@ int main (void)
                 //  ADC will automatically right shift
                 //  4 times, so result has 16-bit precision.
             // Total sampling time length = (SAMPLEN+1)*(Clk_ADC/2)
-        0x1,    // Set sampling time to 1 adc clock cycle?
-        0x2,    // Relative to main clock, have adc clock run 8 times slower
+        0x0,    // Set sampling time to 1 adc clock cycle?
+        0x1,    // Relative to main clock, have adc clock run 8 times slower
         0x1,    // For averaging more than 2 samples, change RESSEL (0x1 for 16-bit)
         0xF,    // Since reference is 1/2, set gain to 1/2 to keep largest
                 // input voltage range (expected input will be 0 - 3.3V)
@@ -68,9 +80,9 @@ int main (void)
         0x2,    // Select a V_DD_AN/2 (1.65) reference
         0x0,    // Now collect 1 sample at a time.
             // Total sampling time length = (SAMPLEN+1)*(Clk_ADC/2)
-        0x1,    // Set sampling time to 1 adc clock cycle?
-        0x0,    // Relative to main clock, have adc clock run 4 times slower
-        0x1,    // For averaging more than 2 samples, change RESSEL (0x1 for 16-bit)
+        0x0,    // Set sampling time to 1 adc clock cycle?
+        0x1,    // Relative to main clock, have adc clock run 4 times slower
+        0x0,    // For averaging more than 2 samples, change RESSEL (0x1 for 16-bit)
         0xF,    // Since reference is 1/2, set gain to 1/2 to keep largest
                 // input voltage range (expected input will be 0 - 3.3V)
         0x18,   // Not using the negative for differential, so ground it.
@@ -98,7 +110,7 @@ int main (void)
 void enable_adc_tc_clocks(void){
     PM->APBCMASK.reg |= (1 << 14u);  // TC6 is in the 14th position (see pg 129)
     
-    uint32_t temp=0x16;   // ID for TC7 is 0x16  (see table 14-2)
+    uint32_t temp=0x16;   // ID for TC6 is 0x16  (see table 14-2)
     temp |= 0<<8;         //  Selection Generic clock generator 0
     GCLK->CLKCTRL.reg=temp;   //  Setup in the CLKCTRL register
     GCLK->CLKCTRL.reg |= 0x1u << 14;    // enable it.
@@ -127,21 +139,19 @@ void configure_adc_interrupt(void){
     disable_adc_timer();
 
         // Set up timer 7 settings
-        //  Sampling frequency = f_s = freq_tc_clk/Prescale_simple_clk/(Period+1)/Prescale_adc_clk
-        //      Let freq_tc_clk = 8Mhz/8
+        //  Sampling frequency = f_s = freq_tc_clk/Prescale_simple_clk/(Period+1)
+        //      Let freq_tc_clk = 8Mhz/64
         //      Let Prescale_simple_clk = 1
-        //      Let Prescale_adc_clk = 4
-        //      Let Period = 249
-        //  --> f_s = (8000/8)/1/250/4 kHz = 1 kHz
+        //      Let Period = 124
+        //  --> f_s = (8000/32)/1/125 kHz = 1 kHz
     adc_timer->CTRLA.reg |=
           (0x1 << 12u)  // Set presynchronizer to prescaled clock
-        | (0x3 << 8u)   // Prescale clock by 8
+        | (0x5 << 8u)   // Prescale clock by 64
         | (0x1 << 2u)   // Start in 8-bit mode
         | (0x2 << 5u)   // Select the Normal PWM waveform generator
         ;
 
-    adc_timer->PER.reg = 249;
-    adc_timer->CC[0].reg = 1;
+    adc_timer->PER.reg = 124;
 
         // Set up timer 6 interrupt
     NVIC->ISER[0] |= 1 << 19u;
@@ -152,38 +162,58 @@ void configure_adc_interrupt(void){
 void adc_handler(void){
         // Create static storage space
     static UINT32 adc_raw = 0, adc_volt = 0;
+
+#ifdef FILTER_LPF
+    // Low pass filter constants
     static float x = 0, y = 0, y_prev = 0, x_prev = 0;
 
 #define SAMP_FREQ 1000
-#define PI 3.14
 #define BW 100
     static const float omega = BW*2*PI/SAMP_FREQ;
 
+#else
+    // Notch filter constants
+
+        // Let the index denote the Z delay, e.g. x[1] = X(Z-1)
+    static float x[3] = {0, 0, 0}, y[3] = {0, 0, 0};
+#endif
+
     if(adc_timer->INTFLAG.reg & 0x1){
+        bankB->OUT.reg ^= 1 << 16u;
             // Read and convert raw pot value
         adc_raw = read_adc();
+
             // Output to dac
+#ifdef FILTER_LPF
+            // Low pass filter implementation
         x = adc_raw;
         y = (1-omega)*y_prev + omega*x_prev;
-        write_to_dac(mapf(
-            y,
-            0,
-#if RESOLUTION == 16
-                0xFFFF,
-#elif RESOLUTION == 12
-                4095,
-#endif
-            0, 1023
-            ));
+        write_to_dac(mapf(y, 0, RES_MAX, 0, 1023));
         y_prev = y;
         x_prev = x;
+#else
+            // Notch filter implementation
+        x[0] = adc_raw;
+            // H(z) =   z^2 - 1.906*z + 0.9981
+            //          ----------------------
+            //          z^2 - 1.790*z + 0.8819
+            // 20 Hz bandwidth
+        y[0] = 1.79f*y[1] - 0.8819f*y[2] + x[0] - 1.906f*x[1] + 0.9981*x[2];
+        bankB->OUT.reg |= 1 << 17u;
+        write_to_dac(mapf(y[0], 0, RES_MAX, 0, 1023));
+        bankB->OUT.reg &= ~(1 << 17u);
+        y[2] = y[1];
+        x[2] = x[1];
+        y[1] = y[0];
+        x[1] = x[0];
+#endif
 
             // Update display
         adc_volt = map32(adc_raw, 0, 0xFFFF, 0, 3300);
-        display_number[0] = adc_volt%10;
-        display_number[1] = (adc_volt%100)/10;
-        display_number[2] = (adc_volt%1000)/100;
-        display_number[3] = (adc_volt%10000)/1000;
+        display_number[3] = adc_volt%10;
+        display_number[2] = (adc_volt%100)/10;
+        display_number[1] = (adc_volt%1000)/100;
+        display_number[0] = (adc_volt%10000)/1000;
 
         adc_timer->INTFLAG.reg |= 0x1;
     }
@@ -231,12 +261,12 @@ void configure_display_interrupt(void){
         // Set up timer 7 settings
     disp_timer->CTRLA.reg |=
           (0x1 << 12u)  // Set presynchronizer to prescaled clock
-        | (0x5 << 8u)   // Prescale clock by 32
+        | (0x6 << 8u)   // Prescale clock by 128
         | (0x0 << 2u)   // Start in 16-bit mode
         | (0x1 << 5u)   // Select the Match Frequncy waveform generator
                         //  Allow control over refresh speed and brightness
         ;
-    disp_timer->CC[0].reg /*= disp_timer->CC[1].reg*/ = 0x50;
+    disp_timer->CC[0].reg = 0x60;
 
         // Set up timer 7 interrupt
     NVIC->ISER[0] |= 1 << 20u;

@@ -97,16 +97,7 @@ unsigned int read_adc(void){
     adc_ptr->SWTRIG.reg |= 1 << 1u;
     while(!adc_ptr->INTFLAG.bit.RESRDY);    //wait for conversion to be available
 
-        // Use a sample and hold method
-    unsigned int toreturn = adc_ptr->RESULT.reg;
-
-    UINT32 count = 0;
-    for(count = 0; count < 350; ++count){
-        adc_ptr->SWTRIG.reg |= 1 << 1u;
-        while(!adc_ptr->INTFLAG.bit.RESRDY);    //wait for conversion to be available
-    }
-    
-    return toreturn; // Extract stored value
+    return adc_ptr->RESULT.reg; // Extract stored value
     
 }
 
@@ -166,13 +157,13 @@ void configure_dac(UINT8 ref){
 }
 
 void enable_dac(void){
-    dac_ptr->CTRLA.reg |= 0x2; // Enable DAC
-
 	while (dac_ptr->STATUS.reg & DAC_STATUS_SYNCBUSY);  // Synchronize clock
+    dac_ptr->CTRLA.reg |= 0x2; // Enable DAC
 }
 
 void disable_dac(void){
     dac_ptr->CTRLA.reg &= ~0x2; // Disable DAC
+	while (dac_ptr->STATUS.reg & DAC_STATUS_SYNCBUSY);  // Synchronize clock
 }
 
 void write_to_dac(UINT16 val){

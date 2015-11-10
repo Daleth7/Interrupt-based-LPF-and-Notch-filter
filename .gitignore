@@ -1,6 +1,6 @@
 ASF/
 config/
-backups/
+Backup/
 asf.h
 *exe
 main_copy_display_only.c
